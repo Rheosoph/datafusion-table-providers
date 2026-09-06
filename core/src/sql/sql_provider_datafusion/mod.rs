@@ -155,13 +155,16 @@ impl<T, P> SqlTable<T, P> {
         projection: Option<&Vec<usize>>,
         sql: String,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(SqlExec::new(
+        restore_zero_column_projection(
             projection,
-            &self.schema(),
-            Arc::clone(&self.pool),
-            sql,
-            self.dialect_arc(),
-        )?))
+            Arc::new(SqlExec::new(
+                projection,
+                &self.schema(),
+                Arc::clone(&self.pool),
+                sql,
+                self.dialect_arc(),
+            )?),
+        )
     }
 
     #[must_use]
@@ -259,6 +262,24 @@ impl<T, P> Display for SqlTable<T, P> {
 static ONE_COLUMN_SCHEMA: LazyLock<SchemaRef> =
     LazyLock::new(|| Arc::new(Schema::new(vec![Field::new("1", DataType::Int64, true)])));
 
+/// SQL uses SELECT 1 for row-count scans. Remove that placeholder before returning
+/// the scan to DataFusion, whose physical schema must match the empty projection.
+pub(crate) fn restore_zero_column_projection(
+    projection: Option<&Vec<usize>>,
+    plan: Arc<dyn ExecutionPlan>,
+) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+    if projection.is_some_and(Vec::is_empty) {
+        Ok(Arc::new(
+            datafusion::physical_plan::projection::ProjectionExec::try_new(
+                Vec::<datafusion::physical_expr::projection::ProjectionExpr>::new(),
+                plan,
+            )?,
+        ))
+    } else {
+        Ok(plan)
+    }
+}
+
 pub fn project_schema_safe(
     schema: &SchemaRef,
     projection: Option<&Vec<usize>>,
@@ -283,7 +304,7 @@ pub struct SqlExec<T, P> {
     projected_schema: SchemaRef,
     pool: Arc<dyn DbConnectionPool<T, P> + Send + Sync>,
     sql: String,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     dialect: Arc<dyn Dialect + Send + Sync>,
 }
 
@@ -313,12 +334,12 @@ impl<T, P> SqlExec<T, P> {
             projected_schema: Arc::clone(&projected_schema),
             pool,
             sql,
-            properties: PlanProperties::new(
+            properties: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(projected_schema),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
-            ),
+            )),
             dialect,
         })
     }
@@ -495,7 +516,7 @@ impl<T: 'static, P: 'static> ExecutionPlan for SqlExec<T, P> {
         Arc::clone(&self.projected_schema)
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
@@ -578,9 +599,16 @@ impl<T: 'static, P: 'static> ExecutionPlan for SqlExec<T, P> {
             Arc::clone(&self.projected_schema),
             vec![order.to_vec()],
         );
-        new_exec.properties = new_exec.properties.with_eq_properties(eq_properties);
+        new_exec.properties =
+            Arc::new(PlanProperties::clone(&new_exec.properties).with_eq_properties(eq_properties));
 
-        Ok(SortOrderPushdownResult::Exact {
+        // Return Inexact rather than Exact so DataFusion keeps the SortExec wrapper
+        // above us. Exact would replace the SortExec with `inner`, which loses the
+        // SortExec's embedded fetch (`ORDER BY ... LIMIT N` is represented as a
+        // single SortExec with fetch=N in DF 52). Keeping the SortExec preserves the
+        // fetch as a TopK applied to our already-sorted SQL output.
+        // We can use Exact once we use DF version which includes PR https://github.com/apache/datafusion/pull/21182
+        Ok(SortOrderPushdownResult::Inexact {
             inner: Arc::new(new_exec),
         })
     }
@@ -790,7 +818,7 @@ mod tests {
         async fn test_sql_to_string() -> Result<(), Box<dyn Error + Send + Sync>> {
             let sql_table = new_sql_table("users", Some(Arc::new(SqliteDialect {})))?;
             let result = sql_table.scan_to_sql(Some(&vec![0]), &[], None)?;
-            assert_eq!(result, r#"SELECT `users`.`name` FROM `users`"#);
+            assert_eq!(result, "SELECT `users`.`name` FROM `users`");
             Ok(())
         }
 
@@ -802,7 +830,7 @@ mod tests {
             let result = sql_table.scan_to_sql(Some(&vec![0, 1]), &filters, Some(3))?;
             assert_eq!(
                 result,
-                r#"SELECT `users`.`name`, `users`.`age` FROM `users` WHERE ((`users`.`age` >= 30) AND (`users`.`name` = 'x')) LIMIT 3"#
+                "SELECT `users`.`name`, `users`.`age` FROM `users` WHERE ((`users`.`age` >= 30) AND (`users`.`name` = 'x')) LIMIT 3"
             );
             Ok(())
         }
@@ -882,7 +910,7 @@ mod tests {
             }];
 
             match exec.try_pushdown_sort(&order).unwrap() {
-                SortOrderPushdownResult::Exact { inner } => {
+                SortOrderPushdownResult::Inexact { inner } => {
                     let sql_exec = inner
                         .as_any()
                         .downcast_ref::<SqlExec<(), &'static dyn ToString>>()
@@ -892,7 +920,7 @@ mod tests {
                         "SELECT \"name\", \"age\" FROM \"users\" ORDER BY \"name\" ASC NULLS FIRST"
                     );
                 }
-                other => panic!("Expected Exact, got {:?}", sort_result_name(&other)),
+                other => panic!("Expected Inexact, got {:?}", sort_result_name(&other)),
             }
         }
 
@@ -908,7 +936,7 @@ mod tests {
             }];
 
             match exec.try_pushdown_sort(&order).unwrap() {
-                SortOrderPushdownResult::Exact { inner } => {
+                SortOrderPushdownResult::Inexact { inner } => {
                     let sql_exec = inner
                         .as_any()
                         .downcast_ref::<SqlExec<(), &'static dyn ToString>>()
@@ -918,7 +946,7 @@ mod tests {
                         "SELECT \"name\", \"age\" FROM \"users\" ORDER BY age DESC NULLS LAST"
                     );
                 }
-                other => panic!("Expected Exact, got {:?}", sort_result_name(&other)),
+                other => panic!("Expected Inexact, got {:?}", sort_result_name(&other)),
             }
         }
 
@@ -943,7 +971,7 @@ mod tests {
             ];
 
             match exec.try_pushdown_sort(&order).unwrap() {
-                SortOrderPushdownResult::Exact { inner } => {
+                SortOrderPushdownResult::Inexact { inner } => {
                     let sql_exec = inner
                         .as_any()
                         .downcast_ref::<SqlExec<(), &'static dyn ToString>>()
@@ -953,7 +981,7 @@ mod tests {
                         "SELECT \"name\", \"age\" FROM \"users\" ORDER BY age DESC NULLS FIRST, \"name\" ASC NULLS LAST"
                     );
                 }
-                other => panic!("Expected Exact, got {:?}", sort_result_name(&other)),
+                other => panic!("Expected Inexact, got {:?}", sort_result_name(&other)),
             }
         }
 
@@ -970,7 +998,7 @@ mod tests {
             }];
 
             match exec.try_pushdown_sort(&order).unwrap() {
-                SortOrderPushdownResult::Exact { inner } => {
+                SortOrderPushdownResult::Inexact { inner } => {
                     let sql_exec = inner
                         .as_any()
                         .downcast_ref::<SqlExec<(), &'static dyn ToString>>()
@@ -980,7 +1008,7 @@ mod tests {
                         "SELECT \"name\", \"age\" FROM \"users\" WHERE \"age\" > 30 ORDER BY \"name\" ASC NULLS FIRST LIMIT 10"
                     );
                 }
-                other => panic!("Expected Exact, got {:?}", sort_result_name(&other)),
+                other => panic!("Expected Inexact, got {:?}", sort_result_name(&other)),
             }
         }
 
@@ -1005,13 +1033,13 @@ mod tests {
             }];
 
             match exec.try_pushdown_sort(&order).unwrap() {
-                SortOrderPushdownResult::Exact { inner } => {
+                SortOrderPushdownResult::Inexact { inner } => {
                     let orderings = inner.properties().output_ordering();
                     assert!(orderings.is_some(), "Output ordering should be set");
                     let output_order = orderings.unwrap();
                     assert_eq!(output_order.len(), 1);
                 }
-                other => panic!("Expected Exact, got {:?}", sort_result_name(&other)),
+                other => panic!("Expected Inexact, got {:?}", sort_result_name(&other)),
             }
         }
 

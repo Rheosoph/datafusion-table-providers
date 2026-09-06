@@ -48,7 +48,7 @@ use tonic::metadata::{AsciiMetadataKey, MetadataMap};
 #[derive(Clone, Debug)]
 pub(crate) struct FlightExec {
     config: FlightConfig,
-    plan_properties: PlanProperties,
+    plan_properties: Arc<PlanProperties>,
     metadata_map: Arc<MetadataMap>,
 }
 
@@ -90,12 +90,12 @@ impl From<FlightConfig> for FlightExec {
         } else {
             Boundedness::Bounded
         };
-        let plan_properties = PlanProperties::new(
+        let plan_properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(config.schema.clone()),
             Partitioning::UnknownPartitioning(config.partitions.len()),
             EmissionType::Incremental,
             exec_mode,
-        );
+        ));
         let mut mm = MetadataMap::new();
         for (k, v) in config.properties.grpc_headers.iter() {
             let key = AsciiMetadataKey::from_str(k.as_str()).expect("invalid header name");
@@ -228,7 +228,14 @@ pub fn enforce_schema(
     batch: RecordBatch,
     target_schema: &SchemaRef,
 ) -> datafusion::arrow::error::Result<RecordBatch> {
-    if target_schema.fields.is_empty() || batch.schema() == *target_schema {
+    if target_schema.fields.is_empty() {
+        RecordBatch::try_new_with_options(
+            target_schema.to_owned(),
+            vec![],
+            &datafusion::arrow::record_batch::RecordBatchOptions::new()
+                .with_row_count(Some(batch.num_rows())),
+        )
+    } else if batch.schema() == *target_schema {
         Ok(batch)
     } else if target_schema.contains(batch.schema_ref()) {
         batch.with_schema(target_schema.to_owned())
@@ -292,7 +299,7 @@ impl ExecutionPlan for FlightExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.plan_properties
     }
 
@@ -388,9 +395,11 @@ mod tests {
         let input_rb = RecordBatch::from(data);
 
         let empty_schema = Arc::new(Schema::empty());
-        let same_rb =
+        let empty_rb =
             enforce_schema(input_rb.clone(), &empty_schema).expect("error enforcing empty schema");
-        assert_eq!(input_rb, same_rb);
+        assert_eq!(empty_rb.num_columns(), 0);
+        assert_eq!(empty_rb.num_rows(), input_rb.num_rows());
+        assert_eq!(empty_rb.schema(), empty_schema);
 
         let coerced_rb = enforce_schema(
             input_rb.clone(),

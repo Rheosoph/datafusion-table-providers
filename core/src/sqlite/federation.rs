@@ -2,6 +2,7 @@ use crate::sql::db_connection_pool::dbconnection::{get_schema, Error as DbError}
 use crate::sql::sql_provider_datafusion::{get_stream, to_execution_error};
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::sql::sqlparser::ast::{self, VisitMut};
 use datafusion::sql::unparser::dialect::Dialect;
 use datafusion_federation::sql::{
@@ -56,7 +57,7 @@ fn sqlite_ast_analyzer(ast: ast::Statement) -> Result<ast::Statement, DataFusion
             // iterate over the query and find any INTERVAL statements
             // find the column they target, and replace the INTERVAL and column with e.g. datetime(column, '+1 day')
             let mut interval_visitor = SQLiteIntervalVisitor::default();
-            new_query.visit(&mut interval_visitor);
+            let _ = new_query.visit(&mut interval_visitor);
 
             Ok(ast::Statement::Query(new_query))
         }
@@ -86,6 +87,7 @@ impl<T, P> SQLExecutor for SQLiteTable<T, P> {
         &self,
         query: &str,
         schema: SchemaRef,
+        _filters: &[Arc<dyn PhysicalExpr>],
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let fut = get_stream(
             self.base_table.clone_pool(),

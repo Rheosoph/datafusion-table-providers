@@ -73,7 +73,7 @@ pub mod postgres;
 pub mod sqlite;
 pub mod utils;
 
-#[pymodule]
+#[pymodule(gil_used = true)]
 // module name need to match project name
 fn _internal(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RawTableProvider>()?;

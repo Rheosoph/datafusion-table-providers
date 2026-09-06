@@ -65,14 +65,17 @@ impl<T, P> DuckDBTable<T, P> {
         schema: &SchemaRef,
         sql: String,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(DuckSqlExec::new(
+        crate::sql::sql_provider_datafusion::restore_zero_column_projection(
             projection,
-            schema,
-            self.base_table.clone_pool(),
-            sql,
-            self.table_functions.clone(),
-            self.base_table.dialect_arc(),
-        )?))
+            Arc::new(DuckSqlExec::new(
+                projection,
+                schema,
+                self.base_table.clone_pool(),
+                sql,
+                self.table_functions.clone(),
+                self.base_table.dialect_arc(),
+            )?),
+        )
     }
 }
 
@@ -175,7 +178,7 @@ impl<T: 'static, P: 'static> ExecutionPlan for DuckSqlExec<T, P> {
         self.base_exec.schema()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         self.base_exec.properties()
     }
 
