@@ -24,6 +24,10 @@ use datafusion::{datasource::TableProvider, sql::TableReference};
 use snafu::prelude::*;
 use std::sync::Arc;
 
+mod dialect;
+
+pub use dialect::OdbcDialect;
+
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display("DbConnectionError: {source}"))]
@@ -72,7 +76,8 @@ where
 
         let table = SqlTable::new("odbc", &dyn_pool, table_reference)
             .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+            .with_dialect(Arc::new(OdbcDialect));
 
         let table_provider = Arc::new(table);
 
