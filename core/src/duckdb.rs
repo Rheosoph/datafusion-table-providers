@@ -26,7 +26,7 @@ use creator::TableManager;
 use datafusion::sql::unparser::dialect::{Dialect, DuckDBDialect};
 use datafusion::{
     catalog::{Session, TableProviderFactory},
-    common::Constraints,
+    common::{Constraint, Constraints},
     datasource::TableProvider,
     error::{DataFusionError, Result as DataFusionResult},
     logical_expr::CreateExternalTable,
@@ -608,7 +608,12 @@ impl DuckDBTableFactory {
         let schema = read_provider.schema();
 
         let table_name = RelationName::from(table_reference);
-        let table_definition = TableDefinition::new(table_name, Arc::clone(&schema));
+        let mut table_definition = TableDefinition::new(table_name, Arc::clone(&schema));
+        // Every insert is verified against the target's primary key, so the definition must
+        // carry the key the existing table was created with or keyed tables reject writes.
+        if let Some(primary_key) = existing_primary_key(&self.pool, &table_definition, &schema)? {
+            table_definition = table_definition.with_constraints(primary_key);
+        }
         let table_writer_builder = DuckDBTableWriterBuilder::new()
             .with_read_provider(read_provider)
             .with_pool(Arc::clone(&self.pool))
@@ -616,6 +621,38 @@ impl DuckDBTableFactory {
 
         Ok(Arc::new(table_writer_builder.build()?))
     }
+}
+
+fn existing_primary_key(
+    pool: &Arc<DuckDbConnectionPool>,
+    table_definition: &TableDefinition,
+    schema: &SchemaRef,
+) -> DataFusionResult<Option<Constraints>> {
+    let mut db_conn = Arc::clone(pool)
+        .connect_sync()
+        .context(DbConnectionPoolSnafu)
+        .map_err(to_datafusion_error)?;
+    let duckdb_conn = DuckDB::duckdb_conn(&mut db_conn).map_err(to_datafusion_error)?;
+    let tx = duckdb_conn
+        .conn
+        .transaction()
+        .context(UnableToBeginTransactionSnafu)
+        .map_err(to_datafusion_error)?;
+    let key_columns = TableManager::new(Arc::new(table_definition.clone()))
+        .current_primary_keys(&tx)
+        .map_err(to_datafusion_error)?;
+    if key_columns.is_empty() {
+        return Ok(None);
+    }
+
+    let mut indices = key_columns
+        .iter()
+        .map(|column| schema.index_of(column))
+        .collect::<Result<Vec<_>, _>>()?;
+    indices.sort_unstable();
+    Ok(Some(Constraints::new_unverified(vec![
+        Constraint::PrimaryKey(indices),
+    ])))
 }
 
 /// For a [`TableReference`] that is a table function, create a name for a view on the original [`TableReference`]
@@ -968,5 +1005,53 @@ pub(crate) mod tests {
         if let Err(e) = result {
             assert_eq!(e.to_string(), "External error: Query execution failed.\nInvalid Input Error: Failed to cast value: Could not convert string 'invalid' to BOOL\nFor details, refer to the DuckDB manual: https://duckdb.org/docs/");
         }
+    }
+
+    #[tokio::test]
+    async fn read_write_provider_inserts_into_a_table_with_a_primary_key() {
+        let pool = Arc::new(
+            DuckDbConnectionPoolBuilder::memory()
+                .build()
+                .expect("in-memory pool"),
+        );
+        {
+            let mut conn = Arc::clone(&pool).connect_sync().expect("connection");
+            DuckDB::duckdb_conn(&mut conn)
+                .expect("DuckDB connection")
+                .conn
+                .execute_batch(
+                    "CREATE TABLE people (id BIGINT PRIMARY KEY, name VARCHAR);
+                     INSERT INTO people VALUES (1, 'ada');",
+                )
+                .expect("seed the keyed table");
+        }
+
+        let table = DuckDBTableFactory::new(Arc::clone(&pool))
+            .read_write_table_provider(TableReference::bare("people"))
+            .await
+            .expect("read-write provider");
+        let ctx = SessionContext::new();
+        ctx.register_table("people", table).expect("register");
+        ctx.sql("INSERT INTO people VALUES (2, 'grace')")
+            .await
+            .expect("plan the insert")
+            .collect()
+            .await
+            .expect("insert into a table with a primary key");
+
+        let batches = ctx
+            .sql("SELECT COUNT(*) FROM people")
+            .await
+            .expect("plan the count")
+            .collect()
+            .await
+            .expect("count");
+        let count = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .expect("COUNT(*) is Int64")
+            .value(0);
+        assert_eq!(count, 2);
     }
 }

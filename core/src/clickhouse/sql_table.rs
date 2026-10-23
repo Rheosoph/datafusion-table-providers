@@ -50,7 +50,7 @@ impl ClickHouseTable {
                 &self.schema(),
                 self.pool.clone(),
                 sql,
-                Arc::new(datafusion::sql::unparser::dialect::DefaultDialect {}),
+                Arc::clone(&self.dialect),
             )?),
         )
     }
