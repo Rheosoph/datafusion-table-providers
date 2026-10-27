@@ -12,6 +12,7 @@ arrow = { workspace = true }
 arrow-ipc = { workspace = true, features = ["lz4"] }
 async-stream = "0.3"
 async-trait = "0.1"
+chrono = "0.4.44"
 clickhouse = "0.15"
 datafusion = { workspace = true, default-features = false, features = ["sql"] }
 datafusion-federation = { workspace = true, features = ["sql"], optional = true }

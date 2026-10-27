@@ -31,9 +31,12 @@ use crate::conn::ClickHouseConnection;
 use crate::pool::ClickHouseConnectionPool;
 use datafusion_table_providers_common::sql::db_connection_pool::dbconnection::AsyncDbConnection;
 
+mod dialect;
 #[cfg(feature = "federation")]
 mod federation;
 mod sql_table;
+
+pub use dialect::ClickHouseDialect;
 
 pub struct ClickHouseTableFactory {
     pool: Arc<ClickHouseConnectionPool>,
@@ -123,7 +126,7 @@ pub struct ClickHouseTable {
     pool: Arc<ClickHouseConnectionPool>,
     schema: SchemaRef,
     constraints: Constraints,
-    dialect: Arc<dyn unparser::dialect::Dialect>,
+    dialect: Arc<dyn unparser::dialect::Dialect + Send + Sync>,
 }
 
 impl std::fmt::Debug for ClickHouseTable {
@@ -150,7 +153,7 @@ impl ClickHouseTable {
             pool,
             schema,
             constraints,
-            dialect: Arc::new(unparser::dialect::DefaultDialect {}),
+            dialect: Arc::new(ClickHouseDialect),
         }
     }
 }
