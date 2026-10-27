@@ -13,6 +13,12 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
+#[cfg(all(feature = "native-tls", feature = "rustls"))]
+compile_error!(
+    "Features `native-tls` and `rustls` are mutually exclusive: mysql_async compiles one TLS backend."
+);
+
 pub mod arrow_sql_gen;
 pub mod conn;
 pub mod pool;

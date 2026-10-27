@@ -18,9 +18,10 @@ datafusion-table-providers-clickhouse = { workspace = true, optional = true }
 datafusion-table-providers-duckdb = { workspace = true, optional = true }
 datafusion-table-providers-flightsql = { workspace = true, optional = true }
 datafusion-table-providers-mongodb = { workspace = true, optional = true }
-datafusion-table-providers-mysql = { workspace = true, optional = true }
+# Not inherited: the TLS backend is chosen by this crate's features.
+datafusion-table-providers-mysql = { version = "0.13.1", path = "../crates/mysql", default-features = false, optional = true }
 datafusion-table-providers-odbc = { workspace = true, optional = true }
-datafusion-table-providers-postgres = { workspace = true, optional = true }
+datafusion-table-providers-postgres = { version = "0.13.1", path = "../crates/postgres", default-features = false, optional = true }
 datafusion-table-providers-sqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -82,14 +83,46 @@ clickhouse = ["dep:datafusion-table-providers-clickhouse"]
 duckdb = ["dep:datafusion-table-providers-duckdb"]
 flight = ["dep:datafusion-table-providers-flightsql"]
 mongodb = ["dep:datafusion-table-providers-mongodb"]
-mysql = ["dep:datafusion-table-providers-mysql"]
+mysql = [
+  "dep:datafusion-table-providers-mysql",
+  "datafusion-table-providers-mysql/federation",
+  "datafusion-table-providers-mysql/native-tls",
+]
+# Builds without OpenSSL. Cannot be combined with `mysql`.
+mysql-rustls = [
+  "dep:datafusion-table-providers-mysql",
+  "datafusion-table-providers-mysql/federation",
+  "datafusion-table-providers-mysql/rustls",
+]
 odbc = ["dep:datafusion-table-providers-odbc"]
-postgres = ["dep:datafusion-table-providers-postgres"]
+postgres = [
+  "dep:datafusion-table-providers-postgres",
+  "datafusion-table-providers-postgres/federation",
+  "datafusion-table-providers-postgres/native-tls",
+]
+# Builds without OpenSSL; takes precedence when combined with `postgres`.
+postgres-rustls = [
+  "dep:datafusion-table-providers-postgres",
+  "datafusion-table-providers-postgres/federation",
+  "datafusion-table-providers-postgres/rustls",
+]
 sqlite = ["dep:datafusion-table-providers-sqlite"]
 
 # docs.rs-specific configuration
 [package.metadata.docs.rs]
-all-features = true
+# Every feature except mysql-rustls, which cannot be combined with mysql.
+features = [
+  "adbc",
+  "clickhouse",
+  "duckdb",
+  "flight",
+  "mongodb",
+  "mysql",
+  "odbc",
+  "postgres",
+  "postgres-rustls",
+  "sqlite",
+]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [[example]]

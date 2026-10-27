@@ -8,7 +8,9 @@ use datafusion_table_providers_common::{
     util::{self, ns_lookup::verify_ns_lookup_and_tcp_connect},
     UnsupportedTypeAction,
 };
+#[cfg(all(feature = "native-tls", not(feature = "rustls")))]
 use native_tls::{Certificate, TlsConnector};
+#[cfg(all(feature = "native-tls", not(feature = "rustls")))]
 use postgres_native_tls::MakeTlsConnector;
 use secrecy::{ExposeSecret, SecretBox, SecretString};
 use snafu::{prelude::*, ResultExt};
@@ -20,6 +22,18 @@ use datafusion_table_providers_common::sql::db_connection_pool::{
     runtime::run_async_with_tokio,
     DbConnectionPool, JoinPushDown, PasswordProvider, StaticPasswordProvider,
 };
+
+#[cfg(not(any(feature = "native-tls", feature = "rustls")))]
+compile_error!("Enable the `native-tls` or the `rustls` feature for PostgreSQL connections.");
+
+/// The TLS connector type used for PostgreSQL connections.
+/// When `rustls` is enabled, rustls is used (takes precedence if both are enabled).
+/// Otherwise, `native-tls` is used (the default).
+#[cfg(feature = "rustls")]
+pub type PostgresTlsMaker = tokio_postgres_rustls::MakeRustlsConnect;
+
+#[cfg(all(feature = "native-tls", not(feature = "rustls")))]
+pub type PostgresTlsMaker = postgres_native_tls::MakeTlsConnector;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -64,10 +78,14 @@ pub enum Error {
     #[snafu(display(
         "Certificate loading failed.\n{source}\nEnsure the root certificate path points to a valid certificate."
     ))]
-    FailedToLoadCertError { source: native_tls::Error },
+    FailedToLoadCertError {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     #[snafu(display("TLS connector initialization failed.\n{source}\nVerify SSL mode and root certificate validity"))]
-    FailedToBuildTlsConnectorError { source: native_tls::Error },
+    FailedToBuildTlsConnectorError {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     #[snafu(display("PostgreSQL connection failed.\n{source}\nFor details, refer to the PostgreSQL documentation: https://www.postgresql.org/docs/17/index.html"))]
     PostgresConnectionError { source: tokio_postgres::Error },
@@ -129,12 +147,12 @@ impl From<tokio_postgres::Error> for ConnectionManagerError {
 /// stored [`Config`] as-is.
 pub struct ConnectionManager {
     config: Config,
-    tls: MakeTlsConnector,
+    tls: PostgresTlsMaker,
     password_provider: Option<Arc<dyn PasswordProvider>>,
 }
 
 impl ConnectionManager {
-    fn new(config: Config, tls: MakeTlsConnector) -> Self {
+    fn new(config: Config, tls: PostgresTlsMaker) -> Self {
         Self {
             config,
             tls,
@@ -354,15 +372,7 @@ impl PostgresConnectionPool {
 
         verify_postgres_config(&config).await?;
 
-        let mut certs: Option<Vec<Certificate>> = None;
-
-        if let Some(path) = ssl_rootcert_path {
-            let buf = tokio::fs::read(path).await.context(FailedToReadCertSnafu)?;
-            certs = Some(parse_certs(&buf)?);
-        }
-
-        let tls_connector = get_tls_connector(ssl_mode.as_str(), certs)?;
-        let connector = MakeTlsConnector::new(tls_connector);
+        let connector = build_tls_connector(ssl_mode.as_str(), ssl_rootcert_path).await?;
 
         // Resolve the password provider: use the caller's, wrap the static password,
         // or leave as None for passwordless auth (trust, cert, etc.).
@@ -539,7 +549,7 @@ fn classify_connection_error(err: tokio_postgres::Error) -> Error {
     Error::PostgresConnectionError { source: err }
 }
 
-async fn test_connection(config: &Config, connector: MakeTlsConnector) -> Result<()> {
+async fn test_connection(config: &Config, connector: PostgresTlsMaker) -> Result<()> {
     config
         .connect(connector)
         .await
@@ -582,11 +592,79 @@ async fn verify_postgres_config(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn get_tls_connector(ssl_mode: &str, rootcerts: Option<Vec<Certificate>>) -> Result<TlsConnector> {
+/// Build the TLS connector from SSL mode and optional root certificate path.
+/// The implementation is chosen at compile time based on the TLS feature flag.
+#[cfg(all(feature = "native-tls", not(feature = "rustls")))]
+async fn build_tls_connector(
+    ssl_mode: &str,
+    ssl_rootcert_path: Option<PathBuf>,
+) -> Result<PostgresTlsMaker> {
+    let mut certs: Option<Vec<Certificate>> = None;
+    if let Some(path) = ssl_rootcert_path {
+        let buf = tokio::fs::read(path).await.context(FailedToReadCertSnafu)?;
+        certs = Some(parse_native_tls_certs(&buf)?);
+    }
+    let tls_connector = get_native_tls_connector(ssl_mode, certs)?;
+    Ok(MakeTlsConnector::new(tls_connector))
+}
+
+#[cfg(feature = "rustls")]
+async fn build_tls_connector(
+    ssl_mode: &str,
+    ssl_rootcert_path: Option<PathBuf>,
+) -> Result<PostgresTlsMaker> {
+    use rustls::{ClientConfig, RootCertStore};
+    use tokio_postgres_rustls::MakeRustlsConnect;
+
+    let mut root_store = RootCertStore::empty();
+
+    // If ssl_mode is "disable", we still need a config but it won't be used
+    if ssl_mode != "disable" {
+        if let Some(path) = ssl_rootcert_path {
+            let buf = tokio::fs::read(&path)
+                .await
+                .context(FailedToReadCertSnafu)?;
+            let certs = parse_rustls_certs(&buf)?;
+            for cert in certs {
+                root_store
+                    .add(cert)
+                    .map_err(|e| Error::FailedToLoadCertError {
+                        source: Box::new(e),
+                    })?;
+            }
+        } else {
+            // Use webpki roots as default trusted certificates
+            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
+    }
+
+    let config_builder = ClientConfig::builder().with_root_certificates(root_store);
+    let mut tls_config = config_builder.with_no_client_auth();
+
+    // Match native-tls behavior for ssl_mode settings
+    if ssl_mode != "verify-full" && ssl_mode != "verify-ca" {
+        // Equivalent to danger_accept_invalid_certs
+        tls_config
+            .dangerous()
+            .set_certificate_verifier(Arc::new(danger::NoCertificateVerification::new()));
+    }
+
+    Ok(MakeRustlsConnect::new(tls_config))
+}
+
+#[cfg(all(feature = "native-tls", not(feature = "rustls")))]
+fn get_native_tls_connector(
+    ssl_mode: &str,
+    rootcerts: Option<Vec<Certificate>>,
+) -> Result<TlsConnector> {
     let mut builder = TlsConnector::builder();
 
     if ssl_mode == "disable" {
-        return builder.build().context(FailedToBuildTlsConnectorSnafu);
+        return builder
+            .build()
+            .map_err(|e| Error::FailedToBuildTlsConnectorError {
+                source: Box::new(e),
+            });
     }
 
     if let Some(certs) = rootcerts {
@@ -599,10 +677,13 @@ fn get_tls_connector(ssl_mode: &str, rootcerts: Option<Vec<Certificate>>) -> Res
         .danger_accept_invalid_hostnames(ssl_mode != "verify-full")
         .danger_accept_invalid_certs(ssl_mode != "verify-full" && ssl_mode != "verify-ca")
         .build()
-        .context(FailedToBuildTlsConnectorSnafu)
+        .map_err(|e| Error::FailedToBuildTlsConnectorError {
+            source: Box::new(e),
+        })
 }
 
-fn parse_certs(buf: &[u8]) -> Result<Vec<Certificate>> {
+#[cfg(all(feature = "native-tls", not(feature = "rustls")))]
+fn parse_native_tls_certs(buf: &[u8]) -> Result<Vec<Certificate>> {
     Certificate::from_der(buf)
         .map(|x| vec![x])
         .or_else(|_| {
@@ -613,7 +694,97 @@ fn parse_certs(buf: &[u8]) -> Result<Vec<Certificate>> {
                 .map(|s| Certificate::from_pem(s.as_bytes()))
                 .collect()
         })
-        .context(FailedToLoadCertSnafu)
+        .map_err(|e| Error::FailedToLoadCertError {
+            source: Box::new(e),
+        })
+}
+
+#[cfg(feature = "rustls")]
+fn parse_rustls_certs(buf: &[u8]) -> Result<Vec<rustls_pki_types::CertificateDer<'static>>> {
+    use std::io::BufReader;
+
+    if buf.is_empty() {
+        return Err(Error::FailedToLoadCertError {
+            source: "Empty certificate data".into(),
+        });
+    }
+
+    if buf.starts_with(b"-----") {
+        let mut reader = BufReader::new(buf);
+        let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::FailedToLoadCertError {
+                source: Box::new(e),
+            })?;
+        if !certs.is_empty() {
+            return Ok(certs);
+        }
+    }
+
+    Ok(vec![rustls_pki_types::CertificateDer::from(buf.to_vec())])
+}
+
+/// Dangerous TLS verifier module for rustls (used when ssl_mode is not verify-full/verify-ca)
+#[cfg(feature = "rustls")]
+mod danger {
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, Error, SignatureScheme};
+
+    #[derive(Debug)]
+    pub struct NoCertificateVerification;
+
+    impl NoCertificateVerification {
+        pub fn new() -> Self {
+            Self
+        }
+    }
+
+    impl ServerCertVerifier for NoCertificateVerification {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> std::result::Result<ServerCertVerified, Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> std::result::Result<HandshakeSignatureValid, Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> std::result::Result<HandshakeSignatureValid, Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            vec![
+                SignatureScheme::RSA_PKCS1_SHA256,
+                SignatureScheme::RSA_PKCS1_SHA384,
+                SignatureScheme::RSA_PKCS1_SHA512,
+                SignatureScheme::ECDSA_NISTP256_SHA256,
+                SignatureScheme::ECDSA_NISTP384_SHA384,
+                SignatureScheme::ECDSA_NISTP521_SHA512,
+                SignatureScheme::ED25519,
+                SignatureScheme::RSA_PSS_SHA256,
+                SignatureScheme::RSA_PSS_SHA384,
+                SignatureScheme::RSA_PSS_SHA512,
+            ]
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

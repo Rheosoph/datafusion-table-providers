@@ -60,3 +60,8 @@ datafusion-table-providers-adbc = { version = "0.13.1", path = "crates/adbc" }
 duckdb = { version = "=1.10505.0" }
 adbc_core = { version = "0.24" }
 adbc_driver_manager = { version = "0.24" }
+rustls = { version = "0.23", default-features = false }
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+tokio-postgres-rustls = "0.13"
+webpki-roots = "1"

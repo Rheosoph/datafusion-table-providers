@@ -17,7 +17,7 @@ datafusion = { workspace = true, default-features = false, features = ["sql"] }
 datafusion-federation = { workspace = true, features = ["sql"], optional = true }
 datafusion-table-providers-common = { workspace = true }
 futures = "0.3"
-mysql_async = { version = "0.37", features = ["native-tls-tls", "chrono", "time", "bigdecimal"] }
+mysql_async = { version = "0.37", features = ["chrono", "time", "bigdecimal"] }
 num-bigint = "0.4"
 sea-query = { version = "1.0.0", features = ["backend-mysql", "with-rust_decimal", "with-bigdecimal", "with-time", "with-chrono"] }
 secrecy = "0.10"
@@ -28,9 +28,12 @@ tracing = "0.1"
 url = "2.5"
 
 [features]
-default = ["federation"]
+default = ["federation", "native-tls"]
 federation = ["dep:datafusion-federation", "datafusion-table-providers-common/federation"]
+# mysql_async cannot compile both TLS backends; enable exactly one.
+native-tls = ["mysql_async/native-tls-tls"]
+rustls = ["mysql_async/rustls-tls"]
 
 [package.metadata.docs.rs]
-all-features = true
+features = ["federation", "native-tls"]
 rustdoc-args = ["--cfg", "docsrs"]
