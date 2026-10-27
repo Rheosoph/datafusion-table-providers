@@ -227,7 +227,14 @@ pub fn enforce_schema(
     batch: RecordBatch,
     target_schema: &SchemaRef,
 ) -> datafusion::arrow::error::Result<RecordBatch> {
-    if target_schema.fields.is_empty() || batch.schema() == *target_schema {
+    if target_schema.fields.is_empty() {
+        RecordBatch::try_new_with_options(
+            target_schema.to_owned(),
+            vec![],
+            &datafusion::arrow::record_batch::RecordBatchOptions::new()
+                .with_row_count(Some(batch.num_rows())),
+        )
+    } else if batch.schema() == *target_schema {
         Ok(batch)
     } else if target_schema.contains(batch.schema_ref()) {
         batch.with_schema(target_schema.to_owned())
@@ -383,9 +390,11 @@ mod tests {
         let input_rb = RecordBatch::from(data);
 
         let empty_schema = Arc::new(Schema::empty());
-        let same_rb =
+        let empty_rb =
             enforce_schema(input_rb.clone(), &empty_schema).expect("error enforcing empty schema");
-        assert_eq!(input_rb, same_rb);
+        assert_eq!(empty_rb.num_columns(), 0);
+        assert_eq!(empty_rb.num_rows(), input_rb.num_rows());
+        assert_eq!(empty_rb.schema(), empty_schema);
 
         let coerced_rb = enforce_schema(
             input_rb.clone(),

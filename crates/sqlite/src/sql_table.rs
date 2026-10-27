@@ -56,13 +56,16 @@ impl<T, P> SQLiteTable<T, P> {
         schema: &SchemaRef,
         sql: String,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(SQLiteSqlExec::new(
+        datafusion_table_providers_common::sql::sql_provider_datafusion::restore_zero_column_projection(
             projection,
-            schema,
-            self.base_table.clone_pool(),
-            sql,
-            self.base_table.dialect_arc(),
-        )?))
+            Arc::new(SQLiteSqlExec::new(
+                projection,
+                schema,
+                self.base_table.clone_pool(),
+                sql,
+                self.base_table.dialect_arc(),
+            )?),
+        )
     }
 }
 

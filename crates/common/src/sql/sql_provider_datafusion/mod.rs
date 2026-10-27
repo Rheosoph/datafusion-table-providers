@@ -158,13 +158,16 @@ impl<T, P> SqlTable<T, P> {
         projection: Option<&Vec<usize>>,
         sql: String,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(SqlExec::new(
+        restore_zero_column_projection(
             projection,
-            &self.schema(),
-            Arc::clone(&self.pool),
-            sql,
-            self.dialect_arc(),
-        )?))
+            Arc::new(SqlExec::new(
+                projection,
+                &self.schema(),
+                Arc::clone(&self.pool),
+                sql,
+                self.dialect_arc(),
+            )?),
+        )
     }
 
     #[must_use]
@@ -274,6 +277,24 @@ impl<T, P> Display for SqlTable<T, P> {
 
 static ONE_COLUMN_SCHEMA: LazyLock<SchemaRef> =
     LazyLock::new(|| Arc::new(Schema::new(vec![Field::new("1", DataType::Int64, true)])));
+
+/// SQL uses SELECT 1 for row-count scans. Remove that placeholder before returning
+/// the scan to DataFusion, whose physical schema must match the empty projection.
+pub fn restore_zero_column_projection(
+    projection: Option<&Vec<usize>>,
+    plan: Arc<dyn ExecutionPlan>,
+) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+    if projection.is_some_and(Vec::is_empty) {
+        Ok(Arc::new(
+            datafusion::physical_plan::projection::ProjectionExec::try_new(
+                Vec::<datafusion::physical_expr::projection::ProjectionExpr>::new(),
+                plan,
+            )?,
+        ))
+    } else {
+        Ok(plan)
+    }
+}
 
 pub fn project_schema_safe(
     schema: &SchemaRef,

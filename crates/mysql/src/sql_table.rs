@@ -70,13 +70,16 @@ impl MySQLTable {
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         let sql = self.base_table.scan_to_sql(projections, filters, limit)?;
-        Ok(Arc::new(MySQLSQLExec::new(
+        datafusion_table_providers_common::sql::sql_provider_datafusion::restore_zero_column_projection(
             projections,
-            schema,
-            Arc::clone(&self.pool),
-            sql,
-            self.base_table.dialect_arc(),
-        )?))
+            Arc::new(MySQLSQLExec::new(
+                projections,
+                schema,
+                Arc::clone(&self.pool),
+                sql,
+                self.base_table.dialect_arc(),
+            )?),
+        )
     }
 }
 

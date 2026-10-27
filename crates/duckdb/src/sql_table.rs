@@ -65,14 +65,17 @@ impl<T, P> DuckDBTable<T, P> {
         schema: &SchemaRef,
         sql: String,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(DuckSqlExec::new(
+        datafusion_table_providers_common::sql::sql_provider_datafusion::restore_zero_column_projection(
             projection,
-            schema,
-            self.base_table.clone_pool(),
-            sql,
-            self.table_functions.clone(),
-            self.base_table.dialect_arc(),
-        )?))
+            Arc::new(DuckSqlExec::new(
+                projection,
+                schema,
+                self.base_table.clone_pool(),
+                sql,
+                self.table_functions.clone(),
+                self.base_table.dialect_arc(),
+            )?),
+        )
     }
 }
 

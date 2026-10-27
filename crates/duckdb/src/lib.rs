@@ -1092,4 +1092,45 @@ pub(crate) mod tests {
             assert_eq!(e.to_string(), "External error: Query execution failed.\nInvalid Input Error: Failed to cast value: Could not convert string 'invalid' to BOOL\nFor details, refer to the DuckDB manual: https://duckdb.org/docs/");
         }
     }
+
+    #[tokio::test]
+    async fn count_star_scans_return_an_empty_physical_schema() {
+        let pool = Arc::new(
+            DuckDbConnectionPoolBuilder::memory()
+                .build()
+                .expect("in-memory pool"),
+        );
+        {
+            let mut conn = Arc::clone(&pool).connect_sync().expect("connection");
+            DuckDB::duckdb_conn(&mut conn)
+                .expect("DuckDB connection")
+                .conn
+                .execute_batch(
+                    "CREATE TABLE test (a INTEGER, b VARCHAR); INSERT INTO test VALUES (3, 'bar'), (4, 'baz');",
+                )
+                .expect("seed the table");
+        }
+
+        let table = DuckDBTableFactory::new(Arc::clone(&pool))
+            .table_provider(TableReference::bare("test"))
+            .await
+            .expect("table provider");
+        let ctx = SessionContext::new();
+        ctx.register_table("test_datafusion", table)
+            .expect("register");
+        let batches = ctx
+            .sql("SELECT COUNT(*) FROM test_datafusion")
+            .await
+            .expect("plan the count")
+            .collect()
+            .await
+            .expect("count");
+        let count = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .expect("COUNT(*) is Int64")
+            .value(0);
+        assert_eq!(count, 2);
+    }
 }

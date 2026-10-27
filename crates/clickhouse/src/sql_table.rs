@@ -45,13 +45,16 @@ impl ClickHouseTable {
         projection: Option<&Vec<usize>>,
         sql: String,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(SqlExec::new(
+        datafusion_table_providers_common::sql::sql_provider_datafusion::restore_zero_column_projection(
             projection,
-            &self.schema(),
-            self.pool.clone(),
-            sql,
-            Arc::new(datafusion::sql::unparser::dialect::DefaultDialect {}),
-        )?))
+            Arc::new(SqlExec::new(
+                projection,
+                &self.schema(),
+                self.pool.clone(),
+                sql,
+                Arc::new(datafusion::sql::unparser::dialect::DefaultDialect {}),
+            )?),
+        )
     }
 }
 
