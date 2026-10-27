@@ -20,9 +20,7 @@ use datafusion_table_providers_common::sql::db_connection_pool::dbconnection::Re
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display("ConnectionError {source}"))]
-    ConnectionError {
-        source: tokio_rusqlite::Error<rusqlite::Error>,
-    },
+    ConnectionError { source: tokio_rusqlite::Error },
 
     #[snafu(display("Unable to query: {source}"))]
     QueryError { source: rusqlite::Error },
@@ -104,7 +102,7 @@ impl AsyncDbConnection<Connection, &'static (dyn ToSql + Sync)> for SqliteConnec
                 )?;
                 let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
                 let tables: Result<Vec<_>, rusqlite::Error> = rows.collect();
-                tables
+                Ok(tables?)
             })
             .await
             .boxed()
@@ -140,7 +138,7 @@ impl AsyncDbConnection<Connection, &'static (dyn ToSql + Sync)> for SqliteConnec
                     .context(ConversionSnafu)
                     .map_err(to_tokio_rusqlite_error)?;
                 let schema = rec.schema();
-                Ok::<SchemaRef, rusqlite::Error>(schema)
+                Ok(schema)
             })
             .await
             .boxed()
@@ -205,6 +203,6 @@ impl AsyncDbConnection<Connection, &'static (dyn ToSql + Sync)> for SqliteConnec
     }
 }
 
-fn to_tokio_rusqlite_error(e: impl Into<Error>) -> rusqlite::Error {
-    rusqlite::Error::ToSqlConversionFailure(Box::new(e.into()))
+fn to_tokio_rusqlite_error(e: impl Into<Error>) -> tokio_rusqlite::Error {
+    tokio_rusqlite::Error::Other(Box::new(e.into()))
 }

@@ -78,17 +78,13 @@ pub enum Error {
     },
 
     #[snafu(display("Unable to create table in Sqlite: {source}"))]
-    UnableToCreateTable {
-        source: tokio_rusqlite::Error<rusqlite::Error>,
-    },
+    UnableToCreateTable { source: tokio_rusqlite::Error },
 
     #[snafu(display("Unable to insert data into the Sqlite table: {source}"))]
     UnableToInsertIntoTable { source: rusqlite::Error },
 
     #[snafu(display("Unable to insert data into the Sqlite table: {source}"))]
-    UnableToInsertIntoTableAsync {
-        source: tokio_rusqlite::Error<rusqlite::Error>,
-    },
+    UnableToInsertIntoTableAsync { source: tokio_rusqlite::Error },
 
     #[snafu(display("Unable to insert data into the Sqlite table. The disk is full."))]
     DiskFull {},
@@ -559,7 +555,7 @@ impl Sqlite {
             .call(move |conn| {
                 let mut stmt = conn.prepare(&sql)?;
                 let exists = stmt.query_row([], |row| row.get(0))?;
-                Ok::<bool, rusqlite::Error>(exists)
+                Ok(exists)
             })
             .await
             .unwrap_or(false)
